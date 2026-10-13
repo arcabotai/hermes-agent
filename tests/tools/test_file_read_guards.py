@@ -298,6 +298,32 @@ class TestNonRegularFileReads(unittest.TestCase):
         self.assertNotIn("not a regular file", result["error"])
 
 
+@unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                 "root bypasses directory search permission")
+class TestAccessDeniedReads(unittest.TestCase):
+    """#138090: an inaccessible path is ``Permission denied``, not ``File not found``."""
+
+    def test_locked_directory_is_permission_denied_not_cached_as_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            locked = os.path.join(tmpdir, "locked")
+            os.mkdir(locked)
+            target = os.path.join(locked, "notes.txt")
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write("x\n")
+            os.chmod(locked, 0)
+            try:
+                result = json.loads(read_file_tool(target, task_id="access_denied_test"))
+            finally:
+                os.chmod(locked, 0o700)
+            self.assertTrue(result["error"].startswith("Permission denied: "), result)
+            self.assertFalse(result.get("not_found"))
+            self.assertNotIn("File not found", result["error"])
+            # Not memoized as a missing file: once access is restored the read works.
+            again = json.loads(read_file_tool(target, task_id="access_denied_test"))
+            self.assertNotIn("error", again)
+            self.assertIn("x", again["content"])
+
+
 # ---------------------------------------------------------------------------
 # Character-count limits
 # ---------------------------------------------------------------------------

@@ -467,3 +467,109 @@ class TestCompoundFallback:
             r = ops.read_file(p)
         assert r.error is None and r.content == "1|one\n2|two"
         assert r.total_lines == 2
+
+_needs_non_root = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses directory search and file read permissions")
+
+@pytest.fixture
+def locked_file(tmp_path):
+    """``locked/notes.txt`` exists, but ``locked`` has mode 000: every stat on
+    the file fails with EACCES, exactly as under a sandbox read-deny (#138090)."""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "notes.txt").write_bytes(b"secret\n")
+    locked.chmod(0)
+    try:
+        yield str(locked / "notes.txt")
+    finally:
+        locked.chmod(0o700)
+
+@pytest.fixture
+def unreadable_file(tmp_path):
+    """A regular file with mode 000 in a searchable directory: stat works, open fails."""
+    p = tmp_path / "unreadable.txt"
+    p.write_bytes(b"secret\n")
+    p.chmod(0)
+    try:
+        yield str(p)
+    finally:
+        p.chmod(0o600)
+
+@_needs_non_root
+class TestAccessDeniedIsNotMissing:
+    """#138090: a path the backend may not stat or read is reported as
+    ``Permission denied``, never ``File not found`` / ``not_found=True``."""
+
+    @staticmethod
+    def _assert_denied(r):
+        assert r.error and r.error.startswith("Permission denied: "), r.error
+        assert r.not_found is False
+        assert r.similar_files == [] and not r.content
+
+    def test_probe_tells_access_denied_from_missing(self, shell, locked_file, unreadable_file, tmp_path):
+        ops, _calls = shell
+        assert ops._probe_regular_file(locked_file) == (0, "access_denied")
+        assert ops._probe_regular_file(unreadable_file) == (0, "access_denied")
+        assert ops._probe_regular_file(str(tmp_path / "absent.txt")) == (0, "missing")
+        # The errno match is anchored: a missing NAME containing the words stays missing.
+        assert ops._probe_regular_file(str(tmp_path / "x: Permission denied")) == (0, "missing")
+        # A dangling symlink is still an existing, non-regular entry.
+        os.symlink(tmp_path / "gone", tmp_path / "dangling.txt")
+        assert ops._probe_regular_file(str(tmp_path / "dangling.txt")) == (0, "not_regular")
+
+    def test_shell_read_in_locked_dir_is_one_round_trip(self, shell, locked_file):
+        ops, calls = shell
+        r = ops.read_file(locked_file)
+        self._assert_denied(r)
+        assert len(calls) == 1 and READ_PROBE_MARK in calls[0]
+
+    def test_shell_read_of_unreadable_file_is_not_empty_content(self, shell, unreadable_file):
+        # Before #138090 the compound probe reported this as an empty 0-byte file.
+        ops, calls = shell
+        r = ops.read_file(unreadable_file)
+        self._assert_denied(r)
+        assert len(calls) == 1
+
+    def test_native_read_never_reports_not_found(self, native, locked_file, unreadable_file):
+        ops, calls = native
+        for p in (locked_file, unreadable_file):
+            self._assert_denied(ops.read_file(p))
+        assert calls == []
+
+    def test_raw_and_bytes_reads(self, shell, locked_file, unreadable_file):
+        ops, _calls = shell
+        for p in (locked_file, unreadable_file):
+            self._assert_denied(ops.read_file_raw(p))
+            self._assert_denied(ops.read_file_bytes(p))
+
+    def test_image_extension_sequential_path(self, shell, tmp_path):
+        ops, _calls = shell
+        locked = tmp_path / "pics"
+        locked.mkdir()
+        (locked / "a.png").write_bytes(b"\x89PNG\r\n")
+        locked.chmod(0)
+        try:
+            self._assert_denied(ops.read_file(str(locked / "a.png")))
+        finally:
+            locked.chmod(0o700)
+
+    def test_sandbox_eperm_wording_is_access_denied(self, shell, tmp_path):
+        """A sandbox (macOS ``sandbox-exec`` read-deny) fails the stat with EPERM:
+        ``ls`` says ``Operation not permitted``. Simulated with an ``ls`` shim."""
+        import subprocess
+        ops, _calls = shell
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "ls"
+        shim.write_text('#!/bin/sh\nfor a; do p="$a"; done\necho "ls: $p: Operation not permitted" >&2\nexit 1\n')
+        shim.chmod(0o755)
+        env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+        def run_with_shim(command, *args, **kwargs):
+            proc = subprocess.run(["sh", "-c", command], capture_output=True, text=True, env=env, check=False)
+            return ExecuteResult(stdout=proc.stdout + proc.stderr, exit_code=proc.returncode)
+
+        with patch.object(ops, "_exec", side_effect=run_with_shim):
+            assert ops._probe_regular_file(str(tmp_path / "hidden.txt")) == (0, "access_denied")
+            self._assert_denied(ops.read_file(str(tmp_path / "hidden.txt")))
