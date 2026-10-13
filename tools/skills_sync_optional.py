@@ -40,7 +40,12 @@ def _safe_rel_install_path(path: Path, base: Path) -> str:
 
 # Only generated runtime state, never generic cache/ or arbitrary dotfiles. This
 # is updater ownership, not the security scanner's content-integrity policy.
-_RUNTIME_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+# ``.venv``/``.uv-cache`` are a skill's own disposable environment and uv cache:
+# often hundreds of MB, rebuilt on demand, and never meant to be seeded into
+# every profile (#137905).
+_RUNTIME_CACHE_DIRS = frozenset({
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".venv", ".uv-cache",
+})
 
 
 def _is_runtime_cache(path: Path, skill_dir: Path) -> bool:

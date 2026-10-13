@@ -66,6 +66,10 @@ def test_real_python_compilation_does_not_freeze_update(skill_tree):
     "scripts/.mypy_cache/3.11/helper.data.json",
     "scripts/.ruff_cache/0.15.0/abc",
     "scripts/helper.pyc", "scripts/helper.pyo",
+    ".venv/lib/python3.11/site-packages/dep/__init__.py",
+    ".venv/pyvenv.cfg",
+    "scripts/.venv/bin/python",
+    ".uv-cache/wheels-v5/pypi/dep/dep-1.0-py3-none-any.whl",
 ])
 def test_runtime_cache_is_not_hash_or_diff_content(skill_tree, cache_path):
     src, dest = skill_tree
@@ -98,6 +102,35 @@ def test_source_cache_is_neither_seeded_nor_recorded(skill_tree):
     ss._write_manifest({})
     assert ss.sync_skills(quiet=True)["copied"] == ["demo"]
     assert not (dest / "scripts/__pycache__").exists()
+
+
+@pytest.mark.parametrize("cache_dir", [".venv", ".uv-cache"])
+def test_source_skill_environment_is_not_seeded_into_profiles(skill_tree, cache_dir):
+    """#137905: a skill that builds its own .venv / uv cache next to its source must
+    not have that environment copied into every profile on sync."""
+    src, dest = skill_tree
+    _write(src, f"{cache_dir}/lib/python3.11/site-packages/dep/__init__.py", "generated")
+    _write(src, f"{cache_dir}/pyvenv.cfg", "home = /usr/bin")
+    _write(src, "SKILL.md", "---\nname: demo\n---\n# Changed upstream\n")
+    assert ss.sync_skills(quiet=True)["updated"] == ["demo"]
+    assert not (dest / cache_dir).exists()
+    assert ss._read_manifest()["demo"] == ss._dir_hash(dest)
+    ss._rmtree_writable(dest)
+    ss._write_manifest({})
+    assert ss.sync_skills(quiet=True)["copied"] == ["demo"]
+    assert not (dest / cache_dir).exists()
+    assert (dest / "scripts/helper.py").read_text() == "ANSWER = 1\n"
+
+
+def test_profile_skill_venv_does_not_freeze_update(skill_tree):
+    """#137905: a skill-local .venv built inside a profile is not a local edit, so
+    upstream updates still apply instead of the skill reading as user-modified."""
+    src, dest = skill_tree
+    _write(dest, ".venv/lib/python3.11/site-packages/dep/__init__.py", "generated")
+    assert list_user_modified_bundled_skills() == []
+    _write(src, "scripts/helper.py", "ANSWER = 2\n")
+    assert ss.sync_skills(quiet=True)["updated"] == ["demo"]
+    assert (dest / "scripts/helper.py").read_text() == "ANSWER = 2\n"
 
 
 def test_legacy_cache_hash_migrates_only_with_matching_origin(skill_tree):
