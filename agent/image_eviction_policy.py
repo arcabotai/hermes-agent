@@ -182,7 +182,9 @@ def outbound_image_retire_count(
     pressure — the request-size limit is hard and the provider answers 413. Even then the
     count stays a step function: it retires whole quanta down toward the floor (keeping
     ``floor`` to ``floor + batch - 1`` carriers, fewer when the byte budget binds), so the
-    cached prefix is rewritten once per quantum rather than on every new image.
+    cached prefix is rewritten once per quantum rather than on every new image. On that
+    branch the quantum is ``batch`` regardless of carrier sizes, so the count never moves
+    backward as the history grows.
     """
     if limit is None:
         limit = outbound_image_block_limit(many_image_safe)
@@ -208,12 +210,16 @@ def outbound_image_retire_count(
         # Reserved uploads alone breach the block ceiling: no retirement can make the request
         # fit it, so shelter the floor but keep advancing in whole quanta. Retiring down to
         # exactly ``total - floor`` here moves the frontier on every new image (#133999). The
-        # quantum is capped by how many carriers the byte budget lets us keep, so byte
-        # pressure narrows the step instead of collapsing it back to the floor.
-        byte_window = max(k for k in range(floor, total + 1) if _bytes_fit(k))
-        quantum = max(1, min(batch, byte_window - floor + 1))
+        # quantum is ``batch``, independent of carrier sizes: a size-derived quantum lets a
+        # small new screenshot shrink ``excess % quantum`` and un-retire older images. Byte
+        # pressure then advances in further whole batches, capped at ``total - floor`` (which
+        # fits the byte budget by the branch condition), so the count stays monotone.
         excess = total - floor
-        return excess - excess % quantum
+        quantum = max(1, batch)
+        retire = excess - excess % quantum
+        while not _bytes_fit(total - retire):
+            retire = min(retire + quantum, excess)
+        return retire
     window = max(k for k in range(total + 1) if _fits(k)) if _fits(0) else 0
     quantum = max(1, min(batch, window - floor))
 

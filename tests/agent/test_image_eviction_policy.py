@@ -252,8 +252,8 @@ def test_unfixable_upload_breach_still_retires_in_batches():
 
 
 def test_unfixable_upload_breach_under_byte_pressure_fits_and_still_steps():
-    """The hold never keeps a request over the byte budget, and byte pressure narrows the
-    step instead of collapsing to the floor (which would move the frontier every image)."""
+    """The hold never keeps a request over the byte budget, never breaks the floor, and the
+    retire count stays monotone as the history grows."""
     span = range(1, 31)
     counts = [
         outbound_image_retire_count(
@@ -264,6 +264,30 @@ def test_unfixable_upload_breach_under_byte_pressure_fits_and_still_steps():
     kept = [n - c for n, c in zip(span, counts)]
     assert all(6 * MB + 3 * MB * k <= 24 * MB for k in kept)
     assert all(k >= min(n, OUTBOUND_IMAGE_FLOOR) for n, k in zip(span, kept))
-    # bytes allow 6 carriers, floor is 3 -> a 4-carrier quantum, so at most one move per 4 images
-    moves = sum(a != b for a, b in itertools.pairwise(counts))
-    assert moves <= -(-(len(span) - OUTBOUND_IMAGE_FLOOR) // 4)
+    # the quantum stays a size-independent batch, so the count never moves backward
+    assert counts == sorted(counts)
+
+
+def test_unfixable_upload_breach_retire_count_never_moves_backward_with_mixed_sizes():
+    """Growing histories with mixed carrier sizes: appending a newest screenshot must never
+    un-retire older ones, which would rewrite the cached prefix (#133999). A quantum derived
+    from the newest carriers' sizes let a small new frame shrink the retired count (8 -> 5)."""
+    import random
+
+    def retire(sizes):
+        return outbound_image_retire_count(
+            [1] * len(sizes), 21, carrier_bytes_newest_first=sizes[::-1], reserved_bytes=6 * MB
+        )
+
+    assert retire([2_900_000] * 11 + [100_000]) >= retire([2_900_000] * 11)
+
+    rng = random.Random(133999)
+    for _ in range(500):
+        history: list[int] = []
+        prev = 0
+        for _ in range(40):
+            history.append(rng.choice([100_000, MB, 2_900_000]))
+            count = retire(history)
+            assert count >= prev, history
+            assert 6 * MB + sum(history[count:]) <= OUTBOUND_IMAGE_BUDGET_BYTES
+            prev = count
