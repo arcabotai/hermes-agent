@@ -1,0 +1,177 @@
+name: Cross-platform dispatch (fork-only)
+
+# Fork-only (arcabotai/hermes-agent) on-demand macOS / Windows test runner.
+# Lives on the `ci/cross-platform-dispatch` branch; never upstream it.
+#
+# Trigger:
+#   gh workflow run cross-platform-dispatch.yml -R arcabotai/hermes-agent \
+#     --ref ci/cross-platform-dispatch -f ref=main -f os=both -f tests='tests/test_hermes_yaml.py'
+#
+# The `push` trigger exists only so GitHub registers this workflow from a
+# non-default branch; push runs execute no jobs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA of arcabotai/hermes-agent to test
+        type: string
+        default: main
+      os:
+        description: Runner OS
+        type: choice
+        options: [both, macos-latest, windows-latest]
+        default: both
+      tests:
+        description: >-
+          pytest args (paths / node ids / flags, shell-quoted). A value that is not a
+          path and does not start with '-' is used as a -k expression over tests/.
+        type: string
+        default: >-
+          tests/test_utils_truthy_values.py tests/test_fast_safe_load.py
+          tests/test_platforms_marker.py tests/test_os_marker_gating.py
+          tests/test_display_hermes_home.py tests/test_utils_rmtree_readonly.py
+          tests/test_atomic_write_fsync_dir_target.py tests/test_hermes_yaml.py
+      extra:
+        description: Optional comma-separated project extras (e.g. all,anthropic). Empty = core only.
+        type: string
+        default: ''
+  push:
+    branches: [ci/cross-platform-dispatch]
+    paths: [.github/workflows/cross-platform-dispatch.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xplat-dispatch-${{ github.event_name }}-${{ inputs.ref }}-${{ inputs.os }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.event_name == 'workflow_dispatch'
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os == 'both' && '["macos-latest","windows-latest"]' || format('["{0}"]', inputs.os)) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      # No test may reach a real provider API.
+      OPENROUTER_API_KEY: ''
+      OPENAI_API_KEY: ''
+      NOUS_API_KEY: ''
+      PYTHONUTF8: '1'
+      TESTS: ${{ inputs.tests }}
+      EXTRA: ${{ inputs.extra }}
+    steps:
+      - name: Checkout ${{ inputs.ref }}
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Resolve Python version and install mode
+        id: meta
+        run: |
+          set -euo pipefail
+          ver=3.13
+          if [ -f .python-version ]; then ver="$(tr -d ' \r\n' < .python-version)"; fi
+          echo "python=$ver" >> "$GITHUB_OUTPUT"
+          if [ -f .github/actions/setup-pm/action.yml ] && [ -f scripts/ci/setup_toolchain.py ]; then
+            echo "mode=pm" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=pip" >> "$GITHUB_OUTPUT"
+          fi
+          extras_json="$(printf '%s' "$EXTRA" | python3 -c 'import json,sys; print(json.dumps([e.strip() for e in sys.stdin.read().split(",") if e.strip()]))' 2>/dev/null || printf '%s' "$EXTRA" | python -c 'import json,sys; print(json.dumps([e.strip() for e in sys.stdin.read().split(",") if e.strip()]))')"
+          echo "extras_json=$extras_json" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Testing $(git rev-parse HEAD) with Python $ver, extras $extras_json"
+
+      - name: Set up Python ${{ steps.meta.outputs.python }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ steps.meta.outputs.python }}
+
+      # Same install path as the repo's own CI (tests.yml / tests-os.yml):
+      # locked PM toolchain + isolated test environment with the dev/test groups.
+      - name: Set up locked Python and test dependencies (setup-pm, like upstream CI)
+        if: steps.meta.outputs.mode == 'pm'
+        uses: ./.github/actions/setup-pm
+        with:
+          packages: ${{ runner.os == 'Windows' && 'git,ripgrep' || 'ripgrep' }}
+          extras: ${{ steps.meta.outputs.extras_json }}
+          test-environment: 'true'
+
+      - name: Fallback install (ref predates setup-pm)
+        if: steps.meta.outputs.mode == 'pip'
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          spec="."
+          if [ -n "$EXTRA" ]; then spec=".[${EXTRA// /}]"; fi
+          python -m pip install -e "$spec" --group dev || python -m pip install -e "$spec" pytest pytest-asyncio
+          echo "HERMES_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+
+      - name: Windows footgun check
+        if: runner.os == 'Windows' && hashFiles('scripts/check-windows-footguns.py') != ''
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p ci-out
+          "${HERMES_PYTHON:-python}" scripts/check-windows-footguns.py --all 2>&1 | tee ci-out/windows-footguns.log
+
+      - name: Run pytest
+        id: pytest
+        run: |
+          mkdir -p ci-out
+          "${HERMES_PYTHON:-python}" - <<'PY'
+          import os, shlex, subprocess, sys
+          raw = os.environ.get("TESTS", "").strip()
+          toks = shlex.split(raw, posix=True)
+          def is_target(t):
+              return os.path.exists(t.split("::", 1)[0])
+          if not toks:
+              args = []
+          elif any(t.startswith("-") for t in toks) or all(is_target(t) for t in toks):
+              args = toks
+          else:
+              args = ["-k", raw]
+          cmd = [sys.executable, "-m", "pytest", *args, "-v", "--tb=short", "-rfE",
+                 "--junitxml=ci-out/junit.xml", "-o", "junit_family=xunit2"]
+          print("+", " ".join(shlex.quote(c) for c in cmd), flush=True)
+          with open("ci-out/pytest.log", "w", encoding="utf-8") as log:
+              p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              for line in iter(p.stdout.readline, b""):
+                  s = line.decode("utf-8", "replace")
+                  sys.stdout.write(s); sys.stdout.flush(); log.write(s)
+              rc = p.wait()
+          print(f"pytest exit code: {rc}")
+          sys.exit(rc)
+          PY
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.os }} — ${{ inputs.ref }} (${{ steps.meta.outputs.commit }})"
+            if [ -f ci-out/pytest.log ]; then
+              echo '```'
+              grep -E '^(FAILED|ERROR) |^=+ .*(passed|failed|error|skipped|no tests ran).* =+$' ci-out/pytest.log | tail -n 60
+              echo '```'
+            else
+              echo "pytest did not run (install/setup failed)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload junit and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xplat-${{ matrix.os }}-${{ github.run_id }}
+          path: ci-out/
+          if-no-files-found: warn
+          retention-days: 14
