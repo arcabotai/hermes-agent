@@ -117,7 +117,9 @@ jobs:
           echo "HERMES_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
 
       - name: Windows footgun check
+        id: footguns
         if: runner.os == 'Windows' && hashFiles('scripts/check-windows-footguns.py') != ''
+        # Non-blocking here so pytest still runs; the job is failed at the end instead.
         continue-on-error: true
         run: |
           set -o pipefail
@@ -160,12 +162,21 @@ jobs:
             echo "### ${{ matrix.os }} — ${{ inputs.ref }} (${{ steps.meta.outputs.commit }})"
             if [ -f ci-out/pytest.log ]; then
               echo '```'
-              grep -E '^(FAILED|ERROR) |^=+ .*(passed|failed|error|skipped|no tests ran).* =+$' ci-out/pytest.log | tail -n 60
+              grep -E '^(FAILED|ERROR) |^=+ .*(passed|failed|error|skipped|no tests ran).* =+[[:space:]]*$' ci-out/pytest.log | tail -n 60
               echo '```'
             else
               echo "pytest did not run (install/setup failed)."
             fi
+            if [ -f ci-out/windows-footguns.log ]; then
+              echo "Windows footguns (${{ steps.footguns.outcome }}): $(tail -n 1 ci-out/windows-footguns.log)"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on Windows footguns
+        if: always() && steps.footguns.outcome == 'failure'
+        run: |
+          echo "::error::scripts/check-windows-footguns.py --all reported footguns (see ci-out/windows-footguns.log)"
+          exit 1
 
       - name: Upload junit and logs
         if: always()
