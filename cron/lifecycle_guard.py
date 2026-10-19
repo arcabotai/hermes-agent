@@ -9,6 +9,7 @@ anchored on concrete command identifiers — so they cannot fire on prose. Defen
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import re
@@ -297,6 +298,57 @@ _DOT_COMMAND_ARGUMENT = re.compile(r"^\.[A-Za-z]")
 _PIPE_TO_INTERPRETER = re.compile(
     r"\|\s*&?\s*(?:sudo\s+)?(?:sh|bash|dash|ksh|zsh|xargs|eval|source)\b"
 )
+# `python -c <code>` whose code provably cannot reach a process API is data too (#141164): Branch D
+# is a raw-text match, so a dict literal reading "KILL/wait" ... "Hermes" ... "gateway" was refused.
+# Only no-value interpreter flags may precede `-c` (`-i` reads more code afterwards, so it is not
+# one of them); the code must parse and use nothing beyond literals, names it assigns itself and
+# calls to these pure builtins. Imports, attribute access, dunder names and every other call keep
+# the plain-regex verdict.
+_INERT_PYTHON_FLAGS = frozenset({"-b", "-B", "-E", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u"})
+_INERT_PYTHON_CALLS = frozenset({"print", "len", "repr", "str", "sorted"})
+_INERT_PYTHON_NODES = (
+    ast.Module, ast.Expr, ast.Assign, ast.Name, ast.Load, ast.Store, ast.Constant, ast.Dict,
+    ast.List, ast.Tuple, ast.Set, ast.Call, ast.keyword, ast.JoinedStr, ast.FormattedValue,
+    ast.Subscript, ast.Slice, ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compare, ast.IfExp,
+    ast.operator, ast.unaryop, ast.boolop, ast.cmpop,
+)
+
+
+def _is_inert_python_source(source: str) -> bool:
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return False
+    nodes = list(ast.walk(tree))
+    assigned = {n.id for n in nodes if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    if assigned & _INERT_PYTHON_CALLS:
+        return False
+    for node in nodes:
+        if not isinstance(node, _INERT_PYTHON_NODES):
+            return False
+        if isinstance(node, ast.Call) and not (
+            isinstance(node.func, ast.Name) and node.func.id in _INERT_PYTHON_CALLS
+        ):
+            return False
+        if isinstance(node, ast.Name) and (
+            node.id.startswith("__") or node.id not in assigned | _INERT_PYTHON_CALLS
+        ):
+            return False
+    return True
+
+
+def _inert_python_payload_index(segment: list[str], index: int) -> Optional[int]:
+    """Index of the ``-c`` code token when *segment* runs Python on provably inert code."""
+    if not _INTERPRETER_IMAGE_RE.match(Path(segment[index]).name.lower()):
+        return None
+    position = index + 1
+    while position < len(segment) and segment[position] in _INERT_PYTHON_FLAGS:
+        position += 1
+    if position + 1 < len(segment) and segment[position] == "-c" and _is_inert_python_source(
+        segment[position + 1]
+    ):
+        return position + 1
+    return None
 
 # Bytes sniffed before reading a referenced file in full (see _BINARY_MAGICS).
 _BINARY_SNIFF_BYTES = 4096
@@ -742,6 +794,13 @@ def _mask_data_sink_arguments(text: str) -> str:
         rebuilt: list[str] = []
         for segment in _split_segments(tokens, keep_controls=True):
             index = _command_token_index(segment)
+            payload_index = _inert_python_payload_index(segment, index) if index is not None else None
+            if payload_index is not None:
+                changed = True
+                rebuilt.extend(segment[:payload_index])
+                rebuilt.append("arg")
+                rebuilt.extend(segment[payload_index + 1 :])
+                continue
             if index is not None and Path(segment[index]).name in _DATA_SINK_EXECUTABLES:
                 arguments = segment[index + 1 :]
                 if not any(
