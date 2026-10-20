@@ -135,12 +135,37 @@ function submitParams(
   }
 }
 
+// Refusals `correct()` raises before it touches the running turn
+// (gateway/session_busy_controls.py): the turn this correction named has ended
+// or has no agent, so the text provably reached nothing and is safe to admit as
+// an ordinary prompt. Anything else (a timeout, a dropped reply) stays ambiguous
+// and keeps the retain semantics: replaying a correction that may already be
+// inside the turn would deliver it twice (#141511).
+const UNDELIVERED_CORRECTION_REASONS = new Set(['execution_not_ready', 'stale_generation', 'unsupported_control'])
+
+function correctionRefusedUndelivered(e: Error & { code?: number; data?: unknown }): boolean {
+  const reason = (e.data as undefined | { reason?: unknown })?.reason ?? e.message
+
+  return e.code === 4001 && typeof reason === 'string' && UNDELIVERED_CORRECTION_REASONS.has(reason)
+}
+
+// The correction became a plain durable admission behind the running turn,
+// keyed by the item's own submission_id (the control call carried none), so
+// the journal row stops re-sending a generation the session already left.
+function readmitAsPrompt(item: QueueItem, readmit: (item: QueueItem) => void): void {
+  delete item.controlMethod
+  delete item.executionGeneration
+  item.legacyAttempted = false
+  readmit(item)
+}
+
 function settleControlReply(
   item: QueueItem,
   r: PromptSubmitResponse,
   deps: SubmitPromptDeps,
   focused: () => boolean,
-  sid: string
+  sid: string,
+  readmit: (item: QueueItem) => void
 ): void {
   // A bare stop phrase typed as a busy correction ended the voice chat and reached
   // no turn (TUI-26): settled, rendered as the stop-phrase event, the turn untouched.
@@ -156,8 +181,13 @@ function settleControlReply(
 
   const control = r as PromptSubmitResponse & { execution_generation?: number }
 
-  const accepted =
-    control.execution_generation === item.executionGeneration && ['queued', 'redirected'].includes(control.status ?? '')
+  const sameTurn = control.execution_generation === item.executionGeneration
+  const accepted = sameTurn && ['queued', 'redirected'].includes(control.status ?? '')
+
+  // The live agent declined it: nothing was applied, so it waits its turn instead.
+  if (sameTurn && control.status === 'rejected') {
+    return readmitAsPrompt(item, readmit)
+  }
 
   item.settle?.(accepted)
 
@@ -333,6 +363,15 @@ export function submitPrompt(
     markSubmitting()
   }
 
+  const readmit = (item: QueueItem) =>
+    submitPrompt(text, deps, showUserMessage, displayOverride, {
+      ...opts,
+      behindTurn: true,
+      destination,
+      queueItem: item,
+      skipDetectDrop: true
+    })
+
   const startSubmit = (displayText: string, submitText: string, show = true) => {
     if (ownsTurn()) {
       beginOwnedTurn(deps, text, displayOverride, displayText, show)
@@ -362,7 +401,7 @@ export function submitPrompt(
       )
       .then(r => {
         if (item?.controlMethod) {
-          settleControlReply(item, r, deps, focused, sid)
+          settleControlReply(item, r, deps, focused, sid, readmit)
 
           return
         }
@@ -402,6 +441,10 @@ export function submitPrompt(
         // compute modes still support legacy submit; retry only these refusals,
         // keeping the prepared payload, destination and queue mode unchanged.
         const preAdmissionRefusal = e.code === 4094 || (e.code === 4000 && /submission_id/.test(e.message ?? ''))
+
+        if (item?.controlMethod && correctionRefusedUndelivered(e)) {
+          return readmitAsPrompt(item, readmit)
+        }
 
         if (item && preAdmissionRefusal && !deps.gw.isCanonical && !item.attachments?.length) {
           await submitLegacy(item, sid, submitText, deps, focused)

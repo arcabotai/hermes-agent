@@ -348,3 +348,112 @@ describe('submissionCore.submitPrompt — typed voice stop on the shared gateway
     expect(getUiState().status).toBe('running…')
   })
 })
+
+// #141511: a busy correction (session.redirect / session.steer) names the turn
+// it was typed against. When the authority proves it never reached that turn
+// (the turn ended, or had no agent), the journal row used to keep the dead
+// generation and re-send it forever ("queued (N)"). It now becomes an ordinary
+// durable admission under its own submission_id.
+describe('submissionCore.submitPrompt — refused busy correction (#141511)', () => {
+  beforeEach(() => {
+    resetUiState()
+    patchUiState({ sid: 'sess-1', info: { model: 'test', tools: {}, skills: {}, stored_session_id: 'stored-1' } })
+  })
+
+  const refusal = (reason: string) => Object.assign(new Error(reason), { code: 4001, data: { reason } })
+
+  const admitted = () => ({
+    admission_id: 'c1',
+    target_session_id: 'stored-1',
+    target_profile_home: captureDestination().profileHome,
+    status: 'queued'
+  })
+
+  const correction = (controlMethod: 'session.redirect' | 'session.steer', settle = vi.fn()) => ({
+    controlMethod,
+    display: 'follow-up',
+    executionGeneration: 3,
+    settle,
+    submissionId: 'c1',
+    text: 'follow-up'
+  })
+
+  const submitCorrection = (gw: GatewayClient, item: ReturnType<typeof correction>, deps = makeDeps(gw)) =>
+    submitPrompt(item.text, deps, true, undefined, {
+      behindTurn: true,
+      destination: captureDestination(),
+      queueItem: item as never,
+      skipDetectDrop: true
+    })
+
+  it.each([
+    ['session.redirect', 'stale_generation'],
+    ['session.redirect', 'execution_not_ready'],
+    ['session.steer', 'stale_generation'],
+    ['session.steer', 'unsupported_control']
+  ] as const)(
+    'a %s refused with %s is re-admitted as prompt.submit with the same submission_id',
+    async (method, reason) => {
+      const request = vi.fn().mockRejectedValueOnce(refusal(reason)).mockResolvedValueOnce(admitted())
+      const gw = { isCanonical: true, request } as unknown as GatewayClient
+      const item = correction(method)
+      const deps = makeDeps(gw)
+
+      submitCorrection(gw, item, deps)
+
+      await vi.waitFor(() => expect(item.settle).toHaveBeenCalledWith(true))
+      expect(item.settle).toHaveBeenCalledTimes(1)
+      expect(request.mock.calls).toEqual([
+        [method, { session_id: 'sess-1', text: 'follow-up', execution_generation: 3 }],
+        ['prompt.submit', { session_id: 'sess-1', text: 'follow-up', submission_id: 'c1', queued: true }]
+      ])
+      expect(item).toMatchObject({ queued: true, legacyAttempted: false })
+      expect(item).not.toHaveProperty('controlMethod')
+      expect(item).not.toHaveProperty('executionGeneration')
+      // Behind the running turn: no second user bubble, the turn's busy state untouched.
+      expect(deps.appendMessage).not.toHaveBeenCalled()
+    }
+  )
+
+  it('a correction the live agent declined (status rejected) waits its turn as a prompt', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 'rejected', execution_generation: 3, text: 'follow-up' })
+      .mockResolvedValueOnce(admitted())
+
+    const gw = { isCanonical: true, request } as unknown as GatewayClient
+    const item = correction('session.steer')
+
+    submitCorrection(gw, item)
+
+    await vi.waitFor(() => expect(item.settle).toHaveBeenCalledWith(true))
+    expect(request.mock.calls.map(([m]) => m)).toEqual(['session.steer', 'prompt.submit'])
+  })
+
+  it.each([
+    ['a timeout', Object.assign(new Error('request timed out after 120s: session.redirect'), {})],
+    ['a refusal that is not about the turn', refusal('permission_denied')],
+    ['a storage failure', Object.assign(new Error('storage_unavailable'), { code: 5071 })]
+  ])('%s stays ambiguous: retained, never replayed as a prompt', async (_label, error) => {
+    const request = vi.fn().mockRejectedValue(error)
+    const gw = { isCanonical: true, request } as unknown as GatewayClient
+    const item = correction('session.redirect')
+
+    submitCorrection(gw, item)
+
+    await vi.waitFor(() => expect(item.settle).toHaveBeenCalledWith(false))
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(item).toMatchObject({ controlMethod: 'session.redirect', executionGeneration: 3, legacyAttempted: true })
+  })
+
+  it('a rejection naming another turn is not re-admitted', async () => {
+    const request = vi.fn().mockResolvedValue({ status: 'rejected', execution_generation: 4 })
+    const gw = { isCanonical: true, request } as unknown as GatewayClient
+    const item = correction('session.redirect')
+
+    submitCorrection(gw, item)
+
+    await vi.waitFor(() => expect(item.settle).toHaveBeenCalledWith(false))
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+})
