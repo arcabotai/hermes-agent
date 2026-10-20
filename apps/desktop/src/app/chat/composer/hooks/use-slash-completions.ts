@@ -20,6 +20,8 @@ import {
 import { $slashCompletionsEpoch, cachedSlashCompletion, hasCachedSlashCompletion } from '@/lib/slash-completion-cache'
 import { normalize } from '@/lib/text'
 import { $sessions } from '@/store/session'
+import { requestForSessionProfile } from '@/store/session-request-router'
+import { knownOwnerForSession } from '@/store/session-states'
 
 import type { CompletionEntry, CompletionPayload } from './use-live-completion-adapter'
 import { useLiveCompletionAdapter } from './use-live-completion-adapter'
@@ -83,6 +85,26 @@ export function useSlashCompletions(options: {
     [sessionId, profile]
   )
 
+  // `commands.catalog` / `complete.slash` carrying a session_id only answer on
+  // the backend that OWNS that session; on a multiplexed local gateway the
+  // window's handle is the primary's socket, which refuses another profile's
+  // session with not_found (#141583). Route them like submit does. A draft
+  // with no session keeps the ambient handle and its `profile` param.
+  const request = useCallback(
+    <T>(method: string, params: Record<string, unknown>): Promise<T> => {
+      if (!gateway) {
+        return Promise.reject(new Error('gateway unavailable'))
+      }
+
+      const ambient = <R>(m: string, p?: Record<string, unknown>) => gateway.request<R>(m, p)
+
+      return sessionId
+        ? requestForSessionProfile<T>(knownOwnerForSession(sessionId), ambient, method, params)
+        : ambient<T>(method, params)
+    },
+    [gateway, sessionId]
+  )
+
   const scopeKey = sessionId ?? (profile ? `profile:${profile}` : '')
   const catalogKey = scopeKey ? `catalog:${scopeKey}` : 'catalog'
 
@@ -92,16 +114,14 @@ export function useSlashCompletions(options: {
       return
     }
 
-    void cachedSlashCompletion(catalogKey, () =>
-      gateway.request<CommandsCatalogLike>('commands.catalog', sessionParams)
-    )
+    void cachedSlashCompletion(catalogKey, () => request<CommandsCatalogLike>('commands.catalog', sessionParams))
       .then(catalog => {
         filterDesktopCommandsCatalog(catalog)
       })
       .catch(() => {
         // Next keystroke retries; don't block the composer on a warm-up miss.
       })
-  }, [gateway, epoch, catalogKey, sessionParams])
+  }, [gateway, request, epoch, catalogKey, sessionParams])
 
   const fetcher = useCallback(
     async (query: string): Promise<CompletionPayload> => {
@@ -174,7 +194,7 @@ export function useSlashCompletions(options: {
         if (!query) {
           const catalog = filterDesktopCommandsCatalog(
             await cachedSlashCompletion(catalogKey, () =>
-              gateway.request<CommandsCatalogLike>('commands.catalog', sessionParams)
+              request<CommandsCatalogLike>('commands.catalog', sessionParams)
             )
           )
 
@@ -216,7 +236,7 @@ export function useSlashCompletions(options: {
         }
 
         const result = await cachedSlashCompletion(`slash:${scopeKey}:${text.toLowerCase()}`, () =>
-          gateway.request<{ items?: CompletionEntry[]; replace_from?: number }>('complete.slash', {
+          request<{ items?: CompletionEntry[]; replace_from?: number }>('complete.slash', {
             text,
             ...sessionParams
           })
@@ -289,7 +309,7 @@ export function useSlashCompletions(options: {
         return { items: [], query }
       }
     },
-    [gateway, skinThemes, activeSkin, scopeKey, catalogKey, sessionParams]
+    [gateway, request, skinThemes, activeSkin, scopeKey, catalogKey, sessionParams]
   )
 
   const toItem = useCallback((entry: CompletionEntry, index: number): Unstable_TriggerItem => {
