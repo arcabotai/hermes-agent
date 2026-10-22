@@ -15,7 +15,7 @@ import itertools
 import json
 from contextlib import contextmanager, nullcontext, suppress
 from contextvars import ContextVar, copy_context
-from functools import wraps
+from functools import partial, wraps
 import logging
 import os
 import re
@@ -142,6 +142,7 @@ from gateway.platforms import api_server_runs as _api_runs
 from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
 from gateway.platforms.api_server_memory_sessions import ApiServerMemorySessions
 from gateway.platforms.api_server_bot_chat import reset_local_title_owner
+from gateway.platforms.api_server_session_list import archived_view_filters, list_session_rows, windowed_count
 from gateway.platforms.base import (
     MEDIA_TAG_CLEANUP_RE, BasePlatformAdapter, SendResult, _terminal_sentinel_start, is_network_accessible,
     validate_media_delivery_path)
@@ -3025,18 +3026,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         title_filter = (request.query.get("title") or "").strip() or None
         include_hidden = bool(title_filter) and _coerce_request_bool(
             request.query.get("include_hidden"), default=False)
-
-        async def _list() -> list:
-            # include_pinned back-fills pins past the recency window; search_query pushes the
-            # title needle into SQL (substring) so a hidden/old row is found, exact match below.
-            rows = await asyncio.to_thread(
-                db.list_sessions_rich, source=source, limit=limit, offset=offset,
-                include_children=include_children, order_by_last_active=True, include_pinned=True,
-                search_query=title_filter, include_hidden=include_hidden)
-            if title_filter:
-                rows = [s for s in rows if (s.get("title") or "").strip() == title_filter]
-            return rows
-
+        if (archive := archived_view_filters(request.query.get("archived"))) is None:
+            return _error_response("archived must be one of: exclude, only, include", 400, code="invalid_archived")
+        _list = partial(list_session_rows, db, title_filter=title_filter, archive=archive, source=source,
+                        limit=limit, offset=offset, include_children=include_children, include_hidden=include_hidden)
         sessions = await _list() or (await reset_local_title_owner(db, title_filter, include_hidden, source))
         if title_filter and not sessions:
             # A canonical Bot Chat auto-archived by the orphan reaper would make `hermes peer dm`
@@ -3058,8 +3051,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     sessions = await _list()
             except Exception:
                 pass  # resolution degrades to today's no-row behavior
-        # Back-filled pins arrive PAST the limit: counting them would report a page that doesn't exist.
-        windowed = sum(1 for s in sessions if not s.get("pinned"))
+        windowed = windowed_count(sessions, archive)
         return web.json_response({
             "object": "list", "data": [self._session_response(s) for s in sessions],
             "limit": limit, "offset": offset, "has_more": windowed >= limit})

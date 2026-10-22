@@ -795,7 +795,7 @@ External UIs can manage Hermes sessions over REST without standing up the dashbo
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/sessions` | List sessions (paginated — `limit`, `offset`, `source`, `include_children`) |
+| `GET` | `/api/sessions` | List sessions (paginated — `limit`, `offset`, `source`, `include_children`; `archived=exclude` (default), `only` or `include`) |
 | `POST` | `/api/sessions` | Create an empty session |
 | `GET` | `/api/sessions/{id}` | Read session metadata |
 | `PATCH` | `/api/sessions/{id}` | Update title or `end_reason` |
