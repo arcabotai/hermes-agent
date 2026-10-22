@@ -153,7 +153,8 @@ def bind_api_steps(authority, session_id, *, hosted_dispatch=None, declared_key=
     ``caller_key`` is this request's validated ``X-Hermes-Session-Key`` even when an explicit
     session id selected the conversation (``declared_key`` is set only when the key selected it).
     It is used only to adopt a row an earlier release stamped with that same key, and is then
-    registered as that session's declared key (and stamped into its binding receipt).
+    registered as that session's declared key (and stamped into its binding receipt) unless the
+    registry already names another session for it.
 
     ``walked_from`` is the stored session a Responses/Runs chain continued from when the chain moved
     past it to *session_id* (``continued_api_session``): the fences it passed stay for good. If one
@@ -242,11 +243,14 @@ def bind_api_steps(authority, session_id, *, hosted_dispatch=None, declared_key=
             # so a later request selecting the conversation by that key still finds this row.
             owner = conn.execute('SELECT value FROM state_meta WHERE key=?',
                                  (_DECLARED_PREFIX + legacy_key,)).fetchone()
-            if owner is not None and owner[0] != session_id:
-                raise RuntimeStoreError('admission_conflict')
-            conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING',
-                         (_DECLARED_PREFIX + legacy_key, session_id))
-            receipt['declared_key'] = legacy_key
+            if owner is None or owner[0] == session_id:
+                conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING',
+                             (_DECLARED_PREFIX + legacy_key, session_id))
+                receipt['declared_key'] = legacy_key
+            # Only an explicit id gets here with the key owned by another session (a key that selected
+            # the conversation was refused above). One memory key spans many transcripts, so earlier
+            # releases stamped it on each of them (#143197): adopt this row, and leave the key's
+            # registered conversation as it is.
         existing = conn.execute("SELECT entry_json FROM gateway_routing WHERE scope='' AND session_key=?",
                                 (route,)).fetchone()
         if existing is not None and json.loads(existing[0])['session_id'] != session_id:
