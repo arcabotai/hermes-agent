@@ -1,4 +1,5 @@
 import type { TranslationOverrides } from './define-locale'
+import { zhHantErrorAuth } from './zh-hant_error_auth'
 import { zhHantThemePicker } from './zh-hant_theme_picker'
 
 export const zhHantAssistant = {
@@ -110,6 +111,7 @@ export const zhHantAssistant = {
           body: '此聊天使用的資料夾已被移動或刪除，因此你的訊息未被執行。請重新建立該資料夾，或使用「Move to project」為聊天指定其他資料夾，然後重試。'
         }
       },
+      ...zhHantErrorAuth,
       errorLayers: {
         auth: '認證錯誤',
         billing: '額度不足',

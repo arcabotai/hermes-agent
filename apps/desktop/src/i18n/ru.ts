@@ -6,6 +6,7 @@ import { ruBoot } from './ru_boot'
 import { ruCatalog, ruSkillDeepLink } from './ru_catalog'
 import { ruClarify } from './ru_clarify'
 import { ruConnectors } from './ru_connectors'
+import { ruErrorAuth } from './ru_error_auth'
 import { ruErrorCodes } from './ru_error_codes'
 import { ruFirstRun } from './ru_first_run'
 import { ruModelMenu } from './ru_model_menu'
@@ -3567,6 +3568,7 @@ export const ruOverrides = {
       branchNewChat: 'Ветка в новый чат',
       react: 'Реакция',
       dismissError: 'Скрыть ошибку',
+      ...ruErrorAuth,
       errorCodes: ruErrorCodes,
       filesChanged: count => `${count} ${RU_PLURAL(count, 'файл изменён', 'файла изменено', 'файлов изменено')}`,
       reviewChanges: 'Проверить',

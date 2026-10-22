@@ -7,6 +7,7 @@ import { jaBoot } from './ja_boot'
 import { jaCatalog, jaSkillDeepLink } from './ja_catalog'
 import { jaClarify } from './ja_clarify'
 import { jaConnectors } from './ja_connectors'
+import { jaErrorAuth } from './ja_error_auth'
 import { jaErrorLayers } from './ja_error_layers'
 import { jaFirstRun } from './ja_first_run'
 import { jaLocalModels } from './ja_local_models'
@@ -3315,6 +3316,7 @@ export const jaOverrides = {
       react: 'リアクション',
       dismissError: 'エラーを閉じる',
       errorGenericProvider: 'AI サービス',
+      ...jaErrorAuth,
       ...jaErrorLayers,
       errorCodes: {
         provider_policy_blocked: {

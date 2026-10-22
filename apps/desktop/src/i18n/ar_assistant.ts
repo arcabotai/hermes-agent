@@ -1,3 +1,4 @@
+import { arErrorAuth } from './ar_error_auth'
 import { arThemePicker } from './ar_theme_picker'
 import type { TranslationOverrides } from './define-locale'
 
@@ -70,6 +71,7 @@ export const arAssistant = {
           body: 'نُقل المجلد الذي تعمل فيه هذه المحادثة أو حُذف، لذا لم تُنفَّذ رسالتك. أعد إنشاء المجلد، أو استخدم «Move to project» لتعيين مجلد آخر للمحادثة، ثم أعد المحاولة.'
         }
       },
+      ...arErrorAuth,
       errorRetry: 'إعادة المحاولة',
       errorSwitchToModel: (model, note) => (note ? `التبديل إلى ${model} (${note})` : `التبديل إلى ${model}`),
       errorSwitchModelFailed: 'تعذر تبديل النموذج',

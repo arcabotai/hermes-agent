@@ -6,6 +6,7 @@ import { introZh } from './intro-zh'
 import { zhCatalog, zhSkillDeepLink } from './zh_catalog'
 import { zhClarify } from './zh_clarify'
 import { zhConnectorCard } from './zh_connector_card'
+import { zhErrorAuth } from './zh_error_auth'
 import { zhErrorLayers } from './zh_error_layers'
 import { zhFirstRun } from './zh_first_run'
 import { zhLocalModels } from './zh_local_models'
@@ -4300,6 +4301,7 @@ export const zhOverrides = {
       react: '回应',
       dismissError: '关闭错误',
       errorGenericProvider: 'AI 服务',
+      ...zhErrorAuth,
       ...zhErrorLayers,
       errorCodes: {
         provider_policy_blocked: {
