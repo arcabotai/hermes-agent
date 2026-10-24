@@ -70,6 +70,14 @@ class TestBlueBubblesHelpers:
         assert adapter.server_url == "http://localhost:1234"
 
 
+class _Absent:
+    def __repr__(self):
+        return "absent"
+
+
+_ABSENT = _Absent()
+
+
 class _FakeBlueBubblesRequest:
     def __init__(self, payload, password="secret"):
         self.query = {"password": password}
@@ -109,6 +117,59 @@ class TestBlueBubblesMentionGating:
 
         assert response.status == 200
         assert handled == []
+
+
+class TestBlueBubblesTapbackFilter:
+    """A tapback is acknowledged and dropped, whichever form BlueBubbles sends its type in (#144113).
+
+    BlueBubbles Server names the six classic tapbacks ("emphasize", "-laugh") and sends codes it has
+    no name for as digit strings ("2006"); raw database rows carry the int code.
+    """
+
+    @staticmethod
+    async def _deliver(monkeypatch, assoc_type):
+        adapter = _make_adapter(monkeypatch, send_read_receipts=False)
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        record = {
+            "guid": "tapback-1",
+            "text": 'Emphasized \u201cyour last reply\u201d',
+            "handle": {"address": "+15555550100"},
+            "isFromMe": False,
+            "chats": [{"guid": "iMessage;-;+15555550100"}],
+            "associatedMessageGuid": "p:0/AGENT-REPLY-GUID",
+        }
+        if assoc_type is not _ABSENT:
+            record["associatedMessageType"] = assoc_type
+        response = await adapter._handle_webhook(_FakeBlueBubblesRequest({"type": "new-message", "data": record}))
+        await asyncio.sleep(0)
+        return response, handled
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("assoc_type", [
+        "love", "like", "dislike", "laugh", "emphasize", "question",   # BlueBubbles names (added)
+        "-love", "-laugh", "-question",                               # BlueBubbles names (removed)
+        "2006", "2007", "3006", "3007",                               # unnamed codes, sent as strings
+        2000, 2004, 3005,                                             # int codes from raw rows
+        2006, 2007, 3006, 3007,                                       # emoji and sticker tapbacks
+    ], ids=repr)
+    async def test_tapback_is_acknowledged_without_an_agent_turn(self, monkeypatch, assoc_type):
+        response, handled = await self._deliver(monkeypatch, assoc_type)
+
+        assert response.status == 200
+        assert handled == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("assoc_type", [_ABSENT, None, 0, "0", "", "lovely", "2008", 1999], ids=repr)
+    async def test_ordinary_message_still_reaches_the_agent(self, monkeypatch, assoc_type):
+        response, handled = await self._deliver(monkeypatch, assoc_type)
+
+        assert response.status == 200
+        assert len(handled) == 1
 
 
 class TestBlueBubblesWebhookParsing:

@@ -54,8 +54,12 @@ MAX_TEXT_LENGTH = 4000
 # `require_mention: true` without custom aliases uses Hermes wake words.
 DEFAULT_MENTION_PATTERNS = [r"(?<![\w@])@?hermes\s+agent\b[,:\-]?", r"(?<![\w@])@?hermes\b[,:\-]?"]
 
-# Tapback associatedMessageType codes: 2000-2005 added, 3000-3005 removed (love, like, dislike, ...).
-_TAPBACK_CODES = {*range(2000, 2006), *range(3000, 3006)}
+# Tapback associatedMessageType codes: 2000-2005 added, 3000-3005 removed (love, like, dislike, ...),
+# 2006/3006 emoji and 2007/3007 sticker tapbacks. BlueBubbles Server names the six classic ones
+# ("emphasize", "-laugh") and sends codes it has no name for as digit strings ("2006").
+_TAPBACK_CODES = {*range(2000, 2008), *range(3000, 3008)}
+_TAPBACK_NAMES = {f"{sign}{name}" for sign in ("", "-")
+                  for name in ("love", "like", "dislike", "laugh", "emphasize", "question")}
 _MESSAGE_EVENTS = {"new-message", "message", "updated-message"}  # webhook event types carrying user messages
 
 _PHONE_RE = re.compile(r"\+?\d{7,15}")
@@ -65,6 +69,16 @@ _ADDRESS_RE = re.compile(r"^\+\d+")
 
 _GUID_CACHE_SIZE = 500  # LRU cap for resolved chat-GUID lookups
 _LOCAL_HOSTS = {"0.0.0.0", "127.0.0.1", "localhost", "::"}
+
+
+def _is_tapback(assoc_type: Any) -> bool:
+    """Whether an ``associatedMessageType`` marks a tapback, sent as a name, a digit string or an int code."""
+    if isinstance(assoc_type, str):
+        value = assoc_type.strip()
+        if value in _TAPBACK_NAMES:
+            return True
+        assoc_type = int(value) if value.isdecimal() else None
+    return isinstance(assoc_type, int) and assoc_type in _TAPBACK_CODES
 
 
 def _redact(text: str) -> str:
@@ -578,8 +592,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         record = self._extract_payload_record(payload) or {}
         if record.get("isFromMe") or record.get("fromMe") or record.get("is_from_me"):
             return _ok()
-        assoc_type = record.get("associatedMessageType")
-        if isinstance(assoc_type, int) and assoc_type in _TAPBACK_CODES:  # tapback reactions delivered as messages
+        if _is_tapback(record.get("associatedMessageType")):  # tapback reactions delivered as messages
             return _ok()
         text = self._value(record.get("text"), record.get("message"), record.get("body")) or ""
         chat_guid, chat_identifier, sender = self._resolve_chat_and_sender(payload, record)
