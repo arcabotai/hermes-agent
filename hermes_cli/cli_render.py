@@ -237,6 +237,17 @@ def _heal_cooked_mode_drift(fd: int) -> bool:
     return True
 
 
+def _configured_theme_pin() -> bool | None:
+    """The ``display.tui_theme`` pin the TUI's /theme persists: light/dark, else None ('auto').
+
+    The TUI bridges it to HERMES_TUI_THEME; honouring it here lets one setting skip the OSC 11
+    probe on a terminal that answers neither OSC 11 nor DA1 (the probe would wait its 1s net).
+    """
+    display = _cli().CLI_CONFIG.get("display")
+    mode = str(display.get("tui_theme") or "").strip().lower() if isinstance(display, dict) else ""
+    return {"light": True, "dark": False}.get(mode)
+
+
 def _detect_light_mode_uncached() -> bool:
     """The detection ladder documented above; may raise (caller maps errors to dark)."""
     from cli import _FALSE_RE, _LIGHT_DEFAULT_TERM_PROGRAMS, _TRUE_RE, _luminance_from_hex, _query_osc11_background
@@ -251,6 +262,9 @@ def _detect_light_mode_uncached() -> bool:
         return True
     if theme == "dark":
         return False
+    pinned = _configured_theme_pin()
+    if pinned is not None:
+        return pinned
     bg_lum = _luminance_from_hex(os.environ.get("HERMES_TUI_BACKGROUND") or "")
     if bg_lum is not None:
         return bg_lum >= 0.5

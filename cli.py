@@ -593,7 +593,7 @@ def _cleanup_worktree(info: dict[str, str] | None = None) -> None:
 
 
 # Light/dark terminal detection (mirrors ui-tui/src/theme.ts detectLightMode()). Priority:
-# HERMES_LIGHT/HERMES_TUI_LIGHT env, HERMES_TUI_THEME, HERMES_TUI_BACKGROUND, COLORFGBG
+# HERMES_LIGHT/HERMES_TUI_LIGHT env, HERMES_TUI_THEME, display.tui_theme, HERMES_TUI_BACKGROUND, COLORFGBG
 # (bg slot 7/15 = light), OSC 11 query, default dark. Cached so the terminal is queried once.
 _LIGHT_MODE_CACHE: bool | None = None
 
