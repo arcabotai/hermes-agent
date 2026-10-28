@@ -26,12 +26,24 @@ def replayable_completions(job_id, completions):
     return [eid for eid in completions or () if journal_path(job_id, eid).exists()]
 
 
+def _pause_unless_held(job_id, reason):
+    """Pause *job_id* for an unverified admission unless something already holds it. Returns the
+    record of the pause THIS call made, else None: a pause that was there first (the operator's,
+    often placed mid-run) keeps its own ``paused_at``/``paused_reason`` and is never recorded as a
+    pause recovery caused, so no receipt can lift it."""
+    from cron.jobs import _jobs_lock, get_job, is_job_runnable, pause_job
+    with _jobs_lock():
+        job = get_job(job_id)
+        if job is None or not is_job_runnable(job):
+            return None
+        return pause_job(job_id, reason=reason)
+
+
 def pause_for_unknown(job_id, execution_id, reason):
     """The firer pauses the job for this fire's unverified admission and records that exact pause
     on the fire's journal, so the receipt that later proves the run terminal can lift it."""
-    from cron.jobs import pause_job
     from utils import atomic_json_write
-    paused = pause_job(job_id, reason=reason)
+    paused = _pause_unless_held(job_id, reason)
     journal = journal_path(job_id, execution_id)
     if paused and journal.exists():
         record = json.loads(journal.read_text(encoding='utf-8-sig'))
@@ -156,7 +168,7 @@ def reconcile_pending(*, allow_connect=True):
     from hermes_constants import get_hermes_home
     from hermes_cli.gateway_client import connect_gateway
     from cron.executions import execution_owner_live, get_execution
-    from cron.jobs import get_job, pause_job
+    from cron.jobs import get_job
     from cron.scheduler import (_RunDelivery, _FireOwnership, _apply_agent_failure_marker,
                                 _save_compose_deliver)
     from cron.scheduler_bookkeeping import fail_empty_response, finish_completed_run
@@ -208,7 +220,7 @@ def reconcile_pending(*, allow_connect=True):
             if state['status'] != 'terminal':
                 if state['status'] == 'unknown' and not record.get('pause_recorded'):
                     reason = 'Canonical cron unknown; no automatic re-execution'
-                    record['pause_recorded'] = _pause_identity(pause_job(params['job_id'], reason=reason))
+                    record['pause_recorded'] = _pause_identity(_pause_unless_held(params['job_id'], reason))
                     atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
                 continue
             success, output, answer, error = state['result']
