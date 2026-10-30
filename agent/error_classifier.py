@@ -1072,12 +1072,33 @@ def _off_route_host(c: _Ctx) -> str:
 _403_TRANSIENT_CODES = frozenset({"upstream_unavailable"})
 
 
+# A 403 whose structured ``type`` says permission was refused is a permission refusal even when
+# the gateway stamps a billing-shaped ``code`` on it (OmniRoute 3.8.49 answers a combo allow-list
+# denial with ``type: permission_error, code: insufficient_quota``; #146649).
+_PERMISSION_REFUSAL_TYPES = frozenset({"permission_error", "permission_denied"})
+
+
+def _billing_haystack_403(c: _Ctx) -> str:
+    """The text a 403 is screened for billing wording.
+
+    ``c.msg`` starts from ``str(error)``, which for an SDK status error is the serialized body,
+    machine ``code`` included. For a permission-typed refusal only the body's own prose counts, so a
+    default billing code never reads as a claim about the balance, while a message that really
+    names one ("exceeded your current quota") still does.
+    """
+    err = _error_obj(c.body)
+    if str(err.get("type") or "").strip().lower() not in _PERMISSION_REFUSAL_TYPES:
+        return c.msg
+    return " ".join(str(m).lower() for m in (err.get("message"), c.body.get("message")) if m)
+
+
 def _status_403(c: _Ctx) -> Verdict:
     if c.code in _403_TRANSIENT_CODES:
         return _V_OVERLOADED
     # OpenRouter 403 "key limit exceeded" and similar plan/credit exhaustion are billing.
     xai_spend = c.provider_slug == "xai-oauth" and c.code == _XAI_SPENDING_LIMIT_ERROR_CODE
-    billing = xai_spend or any(p in c.msg for p in ("key limit exceeded", "spending limit") + _BILLING_PATTERNS)
+    billing = xai_spend or any(
+        p in _billing_haystack_403(c) for p in ("key limit exceeded", "spending limit") + _BILLING_PATTERNS)
     if billing:
         return _V_BILLING
     # A WAF/CDN in front of the provider answered, not the provider: the credential never
