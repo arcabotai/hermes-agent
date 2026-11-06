@@ -205,8 +205,9 @@ def restore_local_session(authority, sid):
             live.source, live.route = source, route
         adapter.register_source(source)
     elif (not adapter.authorize_source(live.source)
-          or live.source.to_dict() != source.to_dict()
+          or not adapter.sources_match_for_restore(live.source, source)
           or adapter.policies.get(chat_id) != policy):
+        # message_id on live is per-turn; comparing full to_dict() paused every later claim (#143537).
         raise RuntimeStoreError('storage_unavailable')
     elif _route_already_restored(store, route, target, receipt.get('lineage', [sid])):
         pass  # every claim of a live session lands here: no write, so no wait on the store lock

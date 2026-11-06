@@ -52,12 +52,26 @@ class LocalSessionAdapter(BasePlatformAdapter):
     def register_source(self, source):
         self.sources[self._source_key(source)] = source, self._identity(source)
 
+    @staticmethod
+    def sources_match_for_restore(left, right):
+        """True when *left* and *right* describe the same conversation for local restore/reuse.
+
+        ``message_id`` is per-turn metadata (pin/reply/react), not conversation identity — a live
+        source stamped by turn N must still match the receipt on turn N+1 (#143537).
+        """
+        a, b = left.to_dict(), right.to_dict()
+        a.pop('message_id', None)
+        b.pop('message_id', None)
+        return a == b
+
     def kept_source(self, source):
         """The object this route was admitted with when *source* is that same source: a closed
         conversation retired from memory comes back with it, so the results its background work
         still holds pass ``authorize_source`` (an identity check)."""
         saved = self.sources.get(self._source_key(source))
-        return saved[0] if saved is not None and saved[0].to_dict() == source.to_dict() else source
+        if saved is not None and self.sources_match_for_restore(saved[0], source):
+            return saved[0]
+        return source
 
     def forget(self, source, route):
         """A deleted conversation's admission source, frozen policy and post-delivery slot (a local
